@@ -14,7 +14,7 @@
 ### 1. Start Server
 ```bash
 cd /Users/snehithraj/PycharmProjects/PythonProject/pg-management-service/app
-python app.py
+python3 app.py
 ```
 
 ### 2. Open Browser

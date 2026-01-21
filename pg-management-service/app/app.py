@@ -85,23 +85,48 @@ def register():
         db.session.add(user)
         db.session.commit()
 
-        # If user is a TENANT, create a tenant record automatically
+        # If user is a TENANT, create a tenant record automatically.
+        # Use provided room_id (from the registration form) if available, otherwise pick the first Available room.
+        created_tenant_id = None
         if user.role == "TENANT":
-            # Get the first available room (or a default room)
-            available_room = Room.query.filter_by(status="Available").first()
+            # Prefer room_id provided by client (so frontend can let user pick a room)
+            requested_room_id = data.get("room_id")
+            available_room = None
+
+            if requested_room_id:
+                available_room = Room.query.filter_by(
+                    id=int(requested_room_id),
+                    status="Available"
+                ).first()
+
+                if not available_room:
+                    return {
+                        "message": "Selected room is no longer available"
+                    }, 400
+            else:
+                return {
+                    "message": "Room selection is required"
+                }, 400
 
             if available_room:
                 tenant = Tenant(
                     user_id=user.id,
-                    name=data.get("name", data["email"].split("@")[0]),  # Use name from request or extract from email
+                    name=data.get("name", data["email"].split("@")[0]),
                     phone=data.get("phone", ""),
                     join_date=date.today(),
                     room_id=available_room.id
                 )
                 db.session.add(tenant)
+                # Mark the room as occupied
+                available_room.status = "Occupied"
+                db.session.add(available_room)
                 db.session.commit()
+                created_tenant_id = tenant.id
 
-        return {"message": "User created", "user_id": user.id}, 201
+        resp = {"message": "User created", "user_id": user.id}
+        if created_tenant_id:
+            resp["tenant_id"] = created_tenant_id
+        return resp, 201
     except Exception as e:
         db.session.rollback()
         return {"message": f"Registration failed: {str(e)}"}, 500
@@ -180,8 +205,8 @@ def add_room():
     return {"message": "Room added"}
 
 @app.route("/rooms", methods=["GET"])
-@login_required
 def list_rooms():
+    # Allow unauthenticated access so users can see rooms during registration
     rooms = Room.query.all()
     return jsonify([
         {
@@ -199,14 +224,38 @@ def list_rooms():
 @app.route("/tenants", methods=["POST"])
 @login_required
 def add_tenant():
-    if current_user.role != "ADMIN":
+    # Allow ADMIN to create tenants for any user. Allow TENANT users to create their own tenant record
+    if current_user.role not in ("ADMIN", "TENANT"):
         return {"error": "Unauthorized"}, 403
 
-    data = request.json
-    tenant = Tenant(**data)
+    data = request.json or {}
+
+    # If the requester is a TENANT, force the user_id to be the current user
+    if current_user.role == "TENANT":
+        data["user_id"] = current_user.id
+
+    # Validate required fields
+    if "user_id" not in data:
+        return {"error": "user_id is required"}, 400
+
+    tenant = Tenant(
+        user_id=data.get("user_id"),
+        name=data.get("name"),
+        phone=data.get("phone"),
+        join_date=data.get("join_date") or date.today(),
+        room_id=data.get("room_id")
+    )
     db.session.add(tenant)
+
+    # If a room_id was provided, mark that room as occupied
+    if tenant.room_id:
+        room = Room.query.get(tenant.room_id)
+        if room:
+            room.status = "Occupied"
+            db.session.add(room)
+
     db.session.commit()
-    return {"message": "Tenant added"}
+    return {"message": "Tenant added", "tenant_id": tenant.id}
 
 @app.route("/tenants", methods=["GET"])
 @login_required
