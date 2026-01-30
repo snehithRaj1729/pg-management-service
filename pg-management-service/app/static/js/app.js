@@ -360,23 +360,360 @@ function showSection(section) {
     } else if (section === 'tenants') {
         loadTenants();
     } else if (section === 'payments'){
+        loadPayments();
+    }
+}
+
+// ============ DASHBOARD ============
+async function loadDashboard() {
+    try {
+        const roomsResp = await fetch(`${API_URL}/rooms`, { credentials: 'include' });
+        const rooms = await roomsResp.json();
+        document.getElementById('totalRooms').textContent = rooms.length;
+
+        const tenantsResp = await fetch(`${API_URL}/tenants`, { credentials: 'include' });
+        const tenants = await tenantsResp.json();
+        document.getElementById('totalTenants').textContent = tenants.length;
+
+        const paymentsResp = await fetch(`${API_URL}/payments`, { credentials: 'include' });
+        const payments = await paymentsResp.json();
+        const pendingCount = payments.filter(p => !p.paid).length;
+        document.getElementById('pendingPayments').textContent = pendingCount;
+
+        const complaintsResp = await fetch(`${API_URL}/complaints`, { credentials: 'include' });
+        const complaints = await complaintsResp.json();
+        document.getElementById('openComplaints').textContent = complaints.length;
+    } catch (error) {
+        console.error('Dashboard load error:', error);
+        showAlert('Error loading dashboard', 'danger');
+    }
+}
+
+// ============ ROOMS ============
+function showAddRoomModal() {
+    document.getElementById('addRoomForm').reset();
+    const modal = new bootstrap.Modal(document.getElementById('addRoomModal'));
+    modal.show();
+}
+
+async function saveRoom() {
+    const roomNo = document.getElementById('roomNo').value;
+    const roomType = document.getElementById('roomType').value;
+    const roomRent = document.getElementById('roomRent').value;
+
+    if (!roomNo || !roomType || !roomRent) {
+        showAlert('Please fill all fields', 'warning');
+        return;
+    }
+
+    try {
+        const response = await fetch(`${API_URL}/rooms`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify({
+                room_no: roomNo,
+                room_type: roomType,
+                rent: parseInt(roomRent),
+                status: 'Available'
+            })
+        });
+
+        if (response.ok) {
+            showAlert('Room added successfully', 'success');
+            bootstrap.Modal.getInstance(document.getElementById('addRoomModal')).hide();
+            loadRooms();
+        } else {
+            const data = await response.json();
+            showAlert(data.message || 'Failed to add room', 'danger');
+        }
+    } catch (error) {
+        showAlert('Error adding room: ' + error.message, 'danger');
+        console.error('Save room error:', error);
+    }
+}
+
+async function loadRooms() {
+    try {
+        const response = await fetch(`${API_URL}/rooms`, { credentials: 'include' });
+        const rooms = await response.json();
+        roomsList = rooms;
+
+        const roomsList_elem = document.getElementById('roomsList');
+        roomsList_elem.innerHTML = '';
+
+        rooms.forEach(room => {
+            const col = document.createElement('div');
+            col.className = 'col-md-6 mb-3';
+            const statusBadge = room.status === 'Available' ? '<span class="badge bg-success">Available</span>' : '<span class="badge bg-danger">Occupied</span>';
+            col.innerHTML = `
+                <div class="card">
+                    <div class="card-body">
+                        <h5 class="card-title">Room ${room.room_no}</h5>
+                        <p><strong>Type:</strong> ${room.room_type}</p>
+                        <p><strong>Rent:</strong> ₹${room.rent}/month</p>
+                        <p><strong>Status:</strong> ${statusBadge}</p>
+                    </div>
+                </div>
+            `;
+            roomsList_elem.appendChild(col);
+        });
+    } catch (error) {
+        console.error('Load rooms error:', error);
+        showAlert('Error loading rooms', 'danger');
+    }
+}
+
+// ============ TENANTS ============
+function showAddTenantModal() {
+    document.getElementById('addTenantForm').reset();
+    loadRoomsForTenant();
+    const modal = new bootstrap.Modal(document.getElementById('addTenantModal'));
+    modal.show();
+}
+
+async function loadRoomsForTenant() {
+    try {
+        const response = await fetch(`${API_URL}/rooms`, { credentials: 'include' });
+        const rooms = await response.json();
+        const roomSelect = document.getElementById('roomSelect');
+        roomSelect.innerHTML = '<option value="">Select a Room</option>';
+
+        rooms.filter(r => r.status === 'Available').forEach(room => {
+            const option = document.createElement('option');
+            option.value = room.id;
+            option.textContent = `Room ${room.room_no} (${room.room_type}) - ₹${room.rent}`;
+            roomSelect.appendChild(option);
+        });
+    } catch (error) {
+        console.error('Load rooms error:', error);
+    }
+}
+
+async function saveTenant() {
+    const name = document.getElementById('tenantName').value;
+    const email = document.getElementById('tenantEmail').value;
+    const phone = document.getElementById('tenantPhone').value;
+    const roomId = document.getElementById('roomSelect').value;
+    const password = document.getElementById('tenantPassword').value;
+
+    if (!name || !email || !phone || !roomId || !password) {
+        showAlert('Please fill all fields', 'warning');
+        return;
+    }
+
+    try {
+        // Step 1: Create user account
+        const registerResp = await fetch(`${API_URL}/register`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify({
+                email: email,
+                password: password,
+                name: name,
+                phone: phone,
+                room_id: parseInt(roomId),
+                role: 'TENANT'
+            })
+        });
+
+        if (!registerResp.ok) {
+            const data = await registerResp.json();
+            showAlert(data.message || 'Failed to create tenant', 'danger');
+            return;
+        }
+
+        showAlert('Tenant added successfully', 'success');
+        bootstrap.Modal.getInstance(document.getElementById('addTenantModal')).hide();
+        loadTenants();
+    } catch (error) {
+        showAlert('Error adding tenant: ' + error.message, 'danger');
+        console.error('Save tenant error:', error);
+    }
+}
+
+async function loadTenants() {
+    try {
+        const response = await fetch(`${API_URL}/tenants`, { credentials: 'include' });
+        const tenants = await response.json();
+        tenantsList = tenants;
+
+        const tbody = document.getElementById('tenantsTableBody');
+        tbody.innerHTML = '';
+
+        tenants.forEach(tenant => {
+            const row = document.createElement('tr');
+            row.innerHTML = `
+                <td>${tenant.name}</td>
+                <td>${tenant.email}</td>
+                <td>${tenant.phone}</td>
+                <td>Room ${tenant.room_no} (${tenant.room_type})</td>
+                <td>₹${tenant.rent}</td>
+                <td>${tenant.join_date}</td>
+            `;
+            tbody.appendChild(row);
+        });
+    } catch (error) {
+        console.error('Load tenants error:', error);
+        showAlert('Error loading tenants', 'danger');
+    }
+}
+
+// ============ PAYMENTS ============
+async function loadPayments() {
+    try {
+        const response = await fetch(`${API_URL}/payments`, { credentials: 'include' });
+        const payments = await response.json();
+        paymentsList = payments;
+
+        const tbody = document.getElementById('paymentsTableBody');
+        tbody.innerHTML = '';
+
+        // Get tenants info for display
+        const tenantsResp = await fetch(`${API_URL}/tenants`, { credentials: 'include' });
+        const tenants = await tenantsResp.json();
+        const tenantMap = {};
+        tenants.forEach(t => tenantMap[t.id] = t);
+
+        payments.forEach(payment => {
+            const tenant = tenantMap[payment.tenant_id] || {};
+            const row = document.createElement('tr');
+            const statusBadge = payment.paid ? '<span class="badge bg-success">PAID</span>' : '<span class="badge bg-warning">PENDING</span>';
+            row.innerHTML = `
+                <td>${tenant.name || 'N/A'}</td>
+                <td>${tenant.email || 'N/A'}</td>
+                <td>${tenant.phone || 'N/A'}</td>
+                <td>Room ${tenant.room_no || 'N/A'} (${tenant.room_type || 'N/A'})</td>
+                <td>${payment.month}</td>
+                <td>₹${payment.amount || 0}</td>
+                <td>${statusBadge}</td>
+            `;
+            tbody.appendChild(row);
+        });
+    } catch (error) {
+        console.error('Load payments error:', error);
+        showAlert('Error loading payments', 'danger');
+    }
+}
+
+// ============ COMPLAINTS ============
+function showAddComplaintModal() {
+    document.getElementById('addComplaintForm').reset();
+    const modal = new bootstrap.Modal(document.getElementById('addComplaintModal'));
+    modal.show();
+}
+
+async function saveComplaint() {
+    const category = document.getElementById('complaintCategory').value;
+    const description = document.getElementById('complaintDesc').value;
+
+    if (!category || !description) {
+        showAlert('Please fill all fields', 'warning');
+        return;
+    }
+
+    try {
+        // Get current tenant ID
+        const tenantsResp = await fetch(`${API_URL}/tenants`, { credentials: 'include' });
+        const tenants = await tenantsResp.json();
+        const currentTenant = tenants.find(t => t.user_id === currentUser.id);
+
+        if (!currentTenant) {
+            showAlert('You must be a tenant to file a complaint', 'danger');
+            return;
+        }
+
+        const response = await fetch(`${API_URL}/complaints`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify({
+                tenant_id: currentTenant.id,
+                category: category,
+                description: description
+            })
+        });
+
+        if (response.ok) {
+            showAlert('Complaint submitted successfully', 'success');
+            bootstrap.Modal.getInstance(document.getElementById('addComplaintModal')).hide();
+            loadComplaints();
+        } else {
+            const data = await response.json();
+            showAlert(data.message || 'Failed to submit complaint', 'danger');
+        }
+    } catch (error) {
+        showAlert('Error submitting complaint: ' + error.message, 'danger');
+        console.error('Save complaint error:', error);
+    }
+}
+
+async function loadComplaints() {
+    try {
+        const response = await fetch(`${API_URL}/complaints`, { credentials: 'include' });
+        const complaints = await response.json();
+        complaintsList = complaints;
+
+        const tbody = document.getElementById('complaintsTableBody');
+        tbody.innerHTML = '';
+
+        // Get tenants for mapping
+        const tenantsResp = await fetch(`${API_URL}/tenants`, { credentials: 'include' });
+        const tenants = await tenantsResp.json();
+        const tenantMap = {};
+        tenants.forEach(t => tenantMap[t.id] = t.name);
+
+        complaints.forEach(complaint => {
+            const row = document.createElement('tr');
+            row.innerHTML = `
+                <td>${tenantMap[complaint.tenant_id] || 'N/A'}</td>
+                <td>${complaint.category}</td>
+                <td>${complaint.description}</td>
+                <td><span class="badge bg-info">${complaint.status}</span></td>
+            `;
+            tbody.appendChild(row);
+        });
+    } catch (error) {
+        console.error('Load complaints error:', error);
+        showAlert('Error loading complaints', 'danger');
+    }
+}
+
+// ============ LOAD DATA ============
+async function loadData() {
+    try {
+        await loadDashboard();
+        if (currentUser.role === 'ADMIN') {
+            await loadRooms();
+            await loadTenants();
+            await loadPayments();
+        }
+        await loadComplaints();
+    } catch (error) {
+        console.error('Load data error:', error);
     }
 }
 
 // Export commonly-used UI functions to the global scope so inline onclick handlers work reliably
 try {
     if (typeof window !== 'undefined') {
-        if (typeof showRegisterModal !== 'undefined') window.showRegisterModal = showRegisterModal;
-        if (typeof registerTenant !== 'undefined') window.registerTenant = registerTenant;
-        if (typeof logout !== 'undefined') window.logout = logout;
-        if (typeof showSection !== 'undefined') window.showSection = showSection;
-        // Some admin functions may be defined elsewhere; attach if present to avoid onclick errors
-        if (typeof showAddRoomModal !== 'undefined') window.showAddRoomModal = showAddRoomModal;
-        if (typeof showAddTenantModal !== 'undefined') window.showAddTenantModal = showAddTenantModal;
-        if (typeof showAddComplaintModal !== 'undefined') window.showAddComplaintModal = showAddComplaintModal;
-        if (typeof saveTenant !== 'undefined') window.saveTenant = saveTenant;
-        if (typeof saveRoom !== 'undefined') window.saveRoom = saveRoom;
-        if (typeof saveComplaint !== 'undefined') window.saveComplaint = saveComplaint;
+        window.showRegisterModal = showRegisterModal;
+        window.registerTenant = registerTenant;
+        window.logout = logout;
+        window.showSection = showSection;
+        window.showAddRoomModal = showAddRoomModal;
+        window.showAddTenantModal = showAddTenantModal;
+        window.showAddComplaintModal = showAddComplaintModal;
+        window.saveTenant = saveTenant;
+        window.saveRoom = saveRoom;
+        window.saveComplaint = saveComplaint;
+        window.loadDashboard = loadDashboard;
+        window.loadRooms = loadRooms;
+        window.loadTenants = loadTenants;
+        window.loadPayments = loadPayments;
+        window.loadComplaints = loadComplaints;
+        window.loadData = loadData;
     }
 } catch (e) {
     // ignore
