@@ -1,10 +1,14 @@
 import os
-from datetime import date
+from datetime import date, timedelta
 from flask import Flask, request, jsonify, render_template
 from flask_cors import CORS
 from flask_login import LoginManager, login_user, logout_user, login_required, current_user
-from werkzeug.security import generate_password_hash, check_password_hash
+from werkzeug.security import check_password_hash
 from models import db, User, Room, Tenant, Payment, Complaint
+import threading
+import time
+import smtplib
+from email.message import EmailMessage
 
 app = Flask(__name__, template_folder='templates', static_folder='static')
 CORS(app, supports_credentials=True)
@@ -62,6 +66,37 @@ def init_db_endpoint():
 @login_manager.user_loader
 def load_user(user_id):
     return User.query.get(int(user_id))
+
+# Sample data initialization
+def init_sample_data():
+    """Initialize database with sample data if it doesn't exist"""
+    try:
+        # Create default admin user if doesn't exist
+        if User.query.filter_by(email='admin@pg.com').first() is None:
+            admin = User(email='admin@pg.com', password='admin123', role='ADMIN')
+            db.session.add(admin)
+
+        # Create default tenant user if doesn't exist
+        if User.query.filter_by(email='tenant@pg.com').first() is None:
+            tenant_user = User(email='tenant@pg.com', password='tenant123', role='TENANT')
+            db.session.add(tenant_user)
+
+        # Create default rooms if don't exist
+        if Room.query.count() == 0:
+            rooms = [
+                Room(room_no='101', room_type='Single', rent=5000, status='Available'),
+                Room(room_no='102', room_type='Double', rent=8000, status='Available'),
+                Room(room_no='103', room_type='Single', rent=5000, status='Available'),
+                Room(room_no='104', room_type='Triple', rent=12000, status='Available'),
+                Room(room_no='105', room_type='Suite', rent=60000, status='Available'),
+            ]
+            for room in rooms:
+                db.session.add(room)
+
+        db.session.commit()
+    except Exception as e:
+        print(f"Error initializing sample data: {e}")
+        db.session.rollback()
 
 # ---------------- AUTH ----------------
 
@@ -262,10 +297,23 @@ def add_tenant():
 def list_tenants():
     tenants = Tenant.query.all()
     tenant_list = []
+    # Lease length (days) can be configured via environment variable LEASE_LENGTH_DAYS
+    lease_days = int(os.getenv('LEASE_LENGTH_DAYS', '30'))
     for t in tenants:
         user = User.query.get(t.user_id)
         room = Room.query.get(t.room_id)
-        tenant_list.append({
+        # Compute an end_date for the tenant using join_date + lease_days
+        try:
+            if t.join_date:
+                end_date = (t.join_date + timedelta(days=lease_days))
+                end_date_str = str(end_date)
+            else:
+                end_date_str = "N/A"
+        except Exception:
+            end_date_str = "N/A"
+
+        # Expose personal info only to admins
+        tenant_obj = {
             "id": t.id,
             "user_id": t.user_id,
             "name": t.name,
@@ -275,124 +323,125 @@ def list_tenants():
             "room_no": room.room_no if room else "N/A",
             "room_type": room.room_type if room else "N/A",
             "rent": room.rent if room else 0,
-            "join_date": str(t.join_date) if t.join_date else "N/A"
-        })
+            "join_date": str(t.join_date) if t.join_date else "N/A",
+            "end_date": end_date_str
+        }
+        if current_user.role == 'ADMIN':
+            tenant_obj['address'] = t.address
+            tenant_obj['id_info'] = t.id_info
+
+        tenant_list.append(tenant_obj)
     return jsonify(tenant_list)
 
-# ---------------- PAYMENTS ----------------
-
-@app.route("/payments", methods=["POST"])
+@app.route('/payments/<int:payment_id>/qr', methods=['GET'])
 @login_required
-def add_payment():
-    if current_user.role != "ADMIN":
+def payment_qr(payment_id):
+    """Return a QR image URL (Google Chart API) encoding a simple payment link for the payment_id."""
+    payment = Payment.query.get(payment_id)
+    if not payment:
+        return {"error": "Payment not found"}, 404
+
+    # Only tenant who owns the payment or admin may request
+    tenant = Tenant.query.get(payment.tenant_id)
+    if current_user.role != 'ADMIN' and (not tenant or tenant.user_id != current_user.id):
         return {"error": "Unauthorized"}, 403
 
-    payment = Payment(**request.json)
-    db.session.add(payment)
-    db.session.commit()
-    return {"message": "Payment recorded"}
+    # Build a payment URL that could be used by payment gateway / manual handling
+    host = request.host_url.rstrip('/')
+    payment_url = f"{host}/pay?payment_id={payment.id}"
 
-@app.route("/payments", methods=["GET"])
+    # For QR code, use simple URL encoding that Google Charts API accepts
+    import urllib.parse
+    qr_data = urllib.parse.quote(payment_url)
+    qr_url = f"https://chart.googleapis.com/chart?chs=300x300&cht=qr&chl={qr_data}"
+
+    return jsonify({
+        "payment_url": payment_url,
+        "qr_url": qr_url
+    })
+
+
+@app.route('/admin/payment-summary', methods=['GET'])
 @login_required
-def view_payments():
-    return jsonify([
-        {"tenant_id": p.tenant_id, "month": p.month, "paid": p.paid}
-        for p in Payment.query.all()
-    ])
-
-# ---------------- COMPLAINTS ----------------
-
-@app.route("/complaints", methods=["POST"])
-@login_required
-def create_complaint():
-    if current_user.role != "TENANT":
-        return {"error": "Only tenants can raise complaints"}, 403
-
-    complaint = Complaint(
-        tenant_id=request.json["tenant_id"],
-        category=request.json["category"],
-        description=request.json["description"]
-    )
-    db.session.add(complaint)
-    db.session.commit()
-    return {"message": "Complaint submitted"}
-
-@app.route("/complaints", methods=["GET"])
-@login_required
-def list_complaints():
-    return jsonify([
-        {"category": c.category, "status": c.status}
-        for c in Complaint.query.all()
-    ])
-
-# ---------------- START ----------------
-
-def init_sample_data():
-    """Initialize database with sample data on first run"""
-    # Check if data already exists
+def admin_payment_summary():
+    if current_user.role != 'ADMIN':
+        return {"error": "Unauthorized"}, 403
     try:
-        if User.query.count() > 0:
-            return
-    except:
-        pass  # Database might not be initialized yet
+        upcoming_days = int(os.getenv('REMINDER_UPCOMING_DAYS', '30'))
+        today = date.today()
+        due_today = 0
+        counts_by_date = {}
 
-    # Create admin user
-    admin = User(
-        email="admin@pg.com",
-        password="pbkdf2:sha256:600000$abc123xyz$admin",
-        role="ADMIN"
-    )
-    db.session.add(admin)
-    db.session.commit()
+        payments = Payment.query.filter_by(paid=False).all()
+        for p in payments:
+            if not p.due_date:
+                continue
+            days_left = (p.due_date - today).days
+            if days_left < 0:
+                continue
+            if days_left == 0:
+                due_today += 1
+            if 0 < days_left <= upcoming_days:
+                dstr = str(p.due_date)
+                counts_by_date[dstr] = counts_by_date.get(dstr, 0) + 1
 
-    # Create tenant user
-    tenant_user = User(
-        email="tenant@pg.com",
-        password="pbkdf2:sha256:600000$def456uvw$tenant",
-        role="TENANT"
-    )
-    db.session.add(tenant_user)
-    db.session.commit()
+        upcoming_list = [{"date": d, "count": counts_by_date[d]} for d in sorted(counts_by_date.keys())]
+        total_upcoming = sum(counts_by_date.values())
+        return jsonify({"due_today": due_today, "total_upcoming": total_upcoming, "upcoming": upcoming_list})
+    except Exception as e:
+        print('Error in admin_payment_summary:', e)
+        return {"error": str(e)}, 500
 
-    # Create sample rooms
-    rooms = [
-        Room(room_no="101", room_type="Single", rent=5000, status="Available"),
-        Room(room_no="102", room_type="Double", rent=8000, status="Available"),
-        Room(room_no="103", room_type="Single", rent=5000, status="Occupied"),
-        Room(room_no="104", room_type="Triple", rent=12000, status="Available"),
-    ]
-    db.session.add_all(rooms)
-    db.session.commit()
 
-    # Create sample tenant record
-    room = Room.query.filter_by(room_no="103").first()
-    tenant = Tenant(
-        user_id=tenant_user.id,
-        name="John Doe",
-        phone="9876543210",
-        join_date=date.today(),
-        room_id=room.id
-    )
-    db.session.add(tenant)
-    db.session.commit()
+def payment_due_check_once():
+    """Check unpaid payments for due_date and notify admins (via email) and return summary."""
+    results = []
+    try:
+        payments = Payment.query.filter_by(paid=False).all()
+        today = date.today()
+        upcoming_days = int(os.getenv('REMINDER_UPCOMING_DAYS', '30'))
+        due_today = []
+        upcoming = {}
 
-    # Create sample payments
-    payments = [
-        Payment(tenant_id=tenant.id, month="January 2026", amount=5000, paid=True),
-        Payment(tenant_id=tenant.id, month="February 2026", amount=5000, paid=False),
-    ]
-    db.session.add_all(payments)
-    db.session.commit()
+        for p in payments:
+            if not p.due_date:
+                continue
+            days_left = (p.due_date - today).days
+            if days_left < 0:
+                continue
+            if days_left == 0:
+                due_today.append(p)
+            if 0 < days_left <= upcoming_days:
+                dstr = str(p.due_date)
+                upcoming[dstr] = upcoming.get(dstr, []) + [p]
 
-    # Create sample complaint
-    complaint = Complaint(
-        tenant_id=tenant.id,
-        category="Plumbing",
-        description="Water leakage in bathroom",
-        status="Pending"
-    )
-    db.session.add(complaint)
-    db.session.commit()
+        # Notify admins if any due_today or upcoming
+        admin_emails = [u.email for u in User.query.filter_by(role='ADMIN').all()]
+        if admin_emails and (due_today or upcoming):
+            subject = 'Payment reminders: pending payments'
+            body_lines = []
+            body_lines.append(f"Payments due today: {len(due_today)}")
+            body_lines.append(f"Payments upcoming (next {upcoming_days} days): {sum(len(v) for v in upcoming.values())}")
+            body_lines.append('\nDetails:')
+            for p in due_today:
+                tenant = Tenant.query.get(p.tenant_id)
+                body_lines.append(f"Due today - Tenant: {tenant.name if tenant else 'N/A'} - Payment ID: {p.id} - Amount: {p.amount}")
+            for d in sorted(upcoming.keys()):
+                for p in upcoming[d]:
+                    tenant = Tenant.query.get(p.tenant_id)
+                    body_lines.append(f"Upcoming {d} - Tenant: {tenant.name if tenant else 'N/A'} - Payment ID: {p.id} - Amount: {p.amount}")
+
+            body = '\n'.join(body_lines)
+            for admin_email in admin_emails:
+                send_email_smtp(admin_email, subject, body)
+
+        # Build simple results list for API usage
+        results.append({"due_today": len(due_today), "total_upcoming": sum(len(v) for v in upcoming.values())})
+    except Exception as e:
+        print('Error during payment_due_check_once:', e)
+        results.append({'error': str(e)})
+    return results
+
 
 # ============ RECEIPTS ============
 @app.route("/receipts/<int:payment_id>", methods=["GET"])
@@ -457,10 +506,337 @@ def get_tenant_payments(tenant_id):
 
     return jsonify(payment_list)
 
+@app.route('/payments', methods=['POST'])
+@login_required
+def add_payment():
+    if current_user.role != 'ADMIN':
+        return {"error": "Unauthorized"}, 403
+
+    data = request.json or {}
+    tenant_id = data.get('tenant_id')
+    month = data.get('month')
+    amount = data.get('amount')
+    paid = data.get('paid', False)
+    due_date = data.get('due_date')  # optional YYYY-MM-DD
+
+    if not tenant_id or month is None or amount is None:
+        return {"error": "tenant_id, month and amount are required"}, 400
+
+    try:
+        payment = Payment(
+            tenant_id=int(tenant_id),
+            month=str(month),
+            amount=int(amount),
+            paid=bool(paid)
+        )
+        if due_date:
+            try:
+                from datetime import datetime
+                payment.due_date = datetime.strptime(due_date, "%Y-%m-%d").date()
+            except Exception:
+                # ignore invalid date format, leave as None
+                pass
+
+        db.session.add(payment)
+        db.session.commit()
+        return {"message": "Payment created", "payment_id": payment.id}, 201
+    except Exception as e:
+        db.session.rollback()
+        return {"error": str(e)}, 500
+
+def send_email_smtp(to_email, subject, body):
+    """Send email using SMTP if configuration present. Prints log if not configured."""
+    smtp_user = os.getenv('SMTP_EMAIL')
+    smtp_pass = os.getenv('SMTP_PASSWORD')
+    smtp_host = os.getenv('SMTP_HOST', 'smtp.gmail.com')
+    smtp_port = int(os.getenv('SMTP_PORT', 587))
+
+    if not smtp_user or not smtp_pass:
+        print("SMTP not configured (SMTP_EMAIL/SMTP_PASSWORD missing). Skipping email to:", to_email)
+        return False
+
+    try:
+        msg = EmailMessage()
+        msg['Subject'] = subject
+        msg['From'] = smtp_user
+        msg['To'] = to_email
+        msg.set_content(body)
+
+        with smtplib.SMTP(smtp_host, smtp_port) as server:
+            server.starttls()
+            server.login(smtp_user, smtp_pass)
+            server.send_message(msg)
+        print(f"Reminder email sent to {to_email}")
+        return True
+    except Exception as e:
+        print(f"Failed to send email to {to_email}: {e}")
+        return False
+
+def due_date_check_once():
+    """Run a single pass of the reminder check and attempt to send emails.
+    Returns a list of dicts describing actions taken for easy inspection/testing.
+    """
+    results = []
+    try:
+        tenants = Tenant.query.all()
+        lease_days = int(os.getenv('LEASE_LENGTH_DAYS', '30'))
+        reminder_days = int(os.getenv('REMINDER_DAYS_BEFORE', '7'))
+
+        for t in tenants:
+            if not t.join_date:
+                continue
+            end_date = t.join_date + timedelta(days=lease_days)
+            days_left = (end_date - date.today()).days
+            # If tenant is at reminder threshold, notify tenant
+            if days_left == reminder_days:
+                user = User.query.get(t.user_id)
+                if user and user.email:
+                    subject = "Your tenancy end date is approaching"
+                    body = f"Hello {t.name},\n\nYour tenancy is scheduled to end on {end_date}. Please let us know whether you want to continue staying or leave. Reply to this email or contact the admin.\n\nRegards,\nPG Management"
+                    sent = send_email_smtp(user.email, subject, body)
+                    results.append({"tenant_id": t.id, "email": user.email, "sent": sent, "days_left": days_left})
+                else:
+                    results.append({"tenant_id": t.id, "email": None, "sent": False, "days_left": days_left})
+            # If tenant's end_date has passed, free the room automatically
+            if days_left < 0:
+                try:
+                    room = Room.query.get(t.room_id) if t.room_id else None
+                    if room and room.status != 'Available':
+                        room.status = 'Available'
+                        db.session.add(room)
+                        db.session.commit()
+                        results.append({"tenant_id": t.id, "freed_room_id": room.id, "room_no": room.room_no})
+                except Exception as e:
+                    print('Error freeing room for tenant', t.id, e)
+                    db.session.rollback()
+    except Exception as e:
+        print("Error during due_date_check_once:", e)
+        results.append({"error": str(e)})
+
+    return results
+
+def due_date_reminder_worker():
+    """Background worker that checks tenants and sends reminder emails before end_date.
+    Runs in a loop once per day (or faster if DEV_REMINDER_INTERVAL_SECONDS set).
+    """
+    # Number of days before end_date to send reminder
+    reminder_days = int(os.getenv('REMINDER_DAYS_BEFORE', '7'))
+    # Sleep interval between checks (seconds). Default one day.
+    interval = int(os.getenv('REMINDER_INTERVAL_SECONDS', str(24*60*60)))
+
+    print("Due date reminder worker started: checking every", interval, "seconds")
+    while True:
+        try:
+            with app.app_context():
+                # Reuse the single-run checker so behavior is consistent and testable
+                results = due_date_check_once()
+                if results:
+                    print("Due-date reminder worker run results:", results)
+                # Run payment due checks as well
+                payment_results = payment_due_check_once()
+                if payment_results:
+                    print("Payment reminder run results:", payment_results)
+                # Additionally, free rooms whose tenant end_date is passed
+                # Implemented inside due_date_check_once: mark rooms Available when end_date < today
+        except Exception as e:
+            print("Error in reminder worker:", e)
+
+        # Sleep before next run
+        time.sleep(interval)
+
+# Start helper for scheduler
+def start_due_date_scheduler():
+    """Start the background reminder worker in a daemon thread."""
+    try:
+        thread = threading.Thread(target=due_date_reminder_worker, daemon=True)
+        thread.start()
+        print("Due date scheduler thread started")
+    except Exception as e:
+        print("Failed to start due date scheduler thread:", e)
+
+# ---------------- ADMIN / DEBUG ROUTES ----------------
+@app.route('/admin/send-test-email', methods=['POST'])
+@login_required
+def admin_send_test_email():
+    """Admin-only: send a one-off test email using configured SMTP settings.
+    Request JSON: {"to_email": "...", "subject": "...", "body": "..."}
+    """
+    if current_user.role != 'ADMIN':
+        return {"error": "Unauthorized"}, 403
+
+    data = request.json or {}
+    to_email = data.get('to_email')
+    subject = data.get('subject', 'PG Management Test Email')
+    body = data.get('body', 'This is a test email from PG Management')
+
+    if not to_email:
+        return {"error": "to_email is required"}, 400
+
+    sent = send_email_smtp(to_email, subject, body)
+    return {"to_email": to_email, "sent": sent}
+
+
+@app.route('/admin/trigger-reminders', methods=['POST'])
+@login_required
+def admin_trigger_reminders():
+    """Admin-only: run the reminder check once and return results (useful for testing)."""
+    if current_user.role != 'ADMIN':
+        return {"error": "Unauthorized"}, 403
+
+    with app.app_context():
+        results = due_date_check_once()
+    return jsonify(results)
+
+@app.route('/admin/reminder-summary', methods=['GET'])
+@login_required
+def admin_reminder_summary():
+    """Admin-only endpoint that returns how many tenants are leaving today and upcoming dates.
+    Response JSON:
+    {
+      "leaving_today": int,
+      "total_upcoming": int,
+      "upcoming": [{"date": "YYYY-MM-DD", "count": n}, ...]
+    }
+    """
+    if current_user.role != 'ADMIN':
+        return {"error": "Unauthorized"}, 403
+
+    try:
+        tenants = Tenant.query.all()
+        lease_days = int(os.getenv('LEASE_LENGTH_DAYS', '30'))
+        upcoming_days = int(os.getenv('REMINDER_UPCOMING_DAYS', '30'))
+
+        today = date.today()
+        counts_by_date = {}
+        leaving_today = 0
+
+        for t in tenants:
+            if not t.join_date:
+                continue
+            end_date = t.join_date + timedelta(days=lease_days)
+            days_left = (end_date - today).days
+            if days_left < 0:
+                continue
+            if days_left == 0:
+                leaving_today += 1
+            if 0 < days_left <= upcoming_days:
+                dstr = str(end_date)
+                counts_by_date[dstr] = counts_by_date.get(dstr, 0) + 1
+
+        upcoming_list = [{"date": d, "count": counts_by_date[d]} for d in sorted(counts_by_date.keys())]
+        total_upcoming = sum(counts_by_date.values())
+
+        return jsonify({
+            "leaving_today": leaving_today,
+            "total_upcoming": total_upcoming,
+            "upcoming": upcoming_list
+        })
+    except Exception as e:
+        print('Error in admin_reminder_summary:', e)
+        return {"error": str(e)}, 500
+
+@app.route('/admin/send-digest-email', methods=['POST'])
+@login_required
+def admin_send_digest_email():
+    """Admin-only: send a daily digest email to all admins with payment and tenant summaries."""
+    if current_user.role != 'ADMIN':
+        return {"error": "Unauthorized"}, 403
+
+    try:
+        # Gather tenant summary
+        tenants = Tenant.query.all()
+        lease_days = int(os.getenv('LEASE_LENGTH_DAYS', '30'))
+        upcoming_days = int(os.getenv('REMINDER_UPCOMING_DAYS', '30'))
+        today = date.today()
+        leaving_today = 0
+        tenant_upcoming = []
+
+        for t in tenants:
+            if not t.join_date:
+                continue
+            end_date = t.join_date + timedelta(days=lease_days)
+            days_left = (end_date - today).days
+            if days_left == 0:
+                leaving_today += 1
+            if 0 < days_left <= upcoming_days:
+                tenant_upcoming.append((t.name, end_date, days_left))
+
+        # Gather payment summary
+        payments = Payment.query.filter_by(paid=False).all()
+        pay_due_today = 0
+        pay_upcoming = []
+
+        for p in payments:
+            if not p.due_date:
+                continue
+            days_left = (p.due_date - today).days
+            if days_left == 0:
+                pay_due_today += 1
+            if 0 < days_left <= upcoming_days:
+                tenant = Tenant.query.get(p.tenant_id)
+                pay_upcoming.append((tenant.name if tenant else 'N/A', p.due_date, p.amount, days_left))
+
+        # Build email body
+        body_lines = []
+        body_lines.append("=" * 60)
+        body_lines.append("PG MANAGEMENT - DAILY DIGEST")
+        body_lines.append(f"Date: {today}")
+        body_lines.append("=" * 60)
+        body_lines.append("")
+
+        body_lines.append("TENANT STATUS SUMMARY")
+        body_lines.append("-" * 60)
+        body_lines.append(f"Tenants leaving today: {leaving_today}")
+        body_lines.append(f"Tenants leaving soon (next {upcoming_days} days): {len(tenant_upcoming)}")
+        if tenant_upcoming:
+            body_lines.append("\nUpcoming departures:")
+            for name, end_date, days_left in sorted(tenant_upcoming, key=lambda x: x[2]):
+                body_lines.append(f"  - {name} (on {end_date}, in {days_left} day(s))")
+        body_lines.append("")
+
+        body_lines.append("PAYMENT STATUS SUMMARY")
+        body_lines.append("-" * 60)
+        body_lines.append(f"Payments due today: {pay_due_today}")
+        body_lines.append(f"Payments due soon (next {upcoming_days} days): {len(pay_upcoming)}")
+        if pay_upcoming:
+            body_lines.append("\nUpcoming payments:")
+            for name, due_date, amount, days_left in sorted(pay_upcoming, key=lambda x: x[3]):
+                body_lines.append(f"  - {name} (₹{amount} on {due_date}, in {days_left} day(s))")
+        body_lines.append("")
+
+        body_lines.append("=" * 60)
+        body_lines.append("End of Daily Digest")
+        body_lines.append("=" * 60)
+
+        subject = f"PG Management - Daily Digest ({today})"
+        body = '\n'.join(body_lines)
+
+        # Send to all admins
+        admin_emails = [u.email for u in User.query.filter_by(role='ADMIN').all()]
+        sent_count = 0
+        for admin_email in admin_emails:
+            if send_email_smtp(admin_email, subject, body):
+                sent_count += 1
+
+        return jsonify({
+            "message": "Digest email sent",
+            "total_admins": len(admin_emails),
+            "sent": sent_count,
+            "date": str(today)
+        }), 200
+    except Exception as e:
+        print('Error in admin_send_digest_email:', e)
+        return {"error": str(e)}, 500
+
 if __name__ == "__main__":
     with app.app_context():
         db.create_all()
         init_sample_data()
+    # Start the due date scheduler (runs in background)
+    try:
+        start_due_date_scheduler()
+    except Exception as e:
+        print("Failed to start reminder scheduler:", e)
     # Use localhost for development, 0.0.0.0 for production
     host = os.getenv('FLASK_HOST', 'localhost')
     port = int(os.getenv('FLASK_PORT', 8000))

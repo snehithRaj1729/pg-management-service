@@ -361,6 +361,8 @@ function showSection(section) {
         loadTenants();
     } else if (section === 'payments'){
         loadPayments();
+    } else if (section === 'tenantPayments') {
+        loadTenantPayments();
     }
 }
 
@@ -375,6 +377,39 @@ async function loadDashboard() {
         const tenants = await tenantsResp.json();
         document.getElementById('totalTenants').textContent = tenants.length;
 
+        // If the current user is a TENANT, show their due date in the dashboard card
+        try {
+            if (currentUser && currentUser.role === 'TENANT') {
+                // Match by user_id if available, otherwise fallback to matching by email
+                const myTenant = tenants.find(t => (currentUser.id && t.user_id === currentUser.id) || (currentUser.email && t.email === currentUser.email));
+                const dueElem = document.getElementById('tenantDueDate');
+                if (dueElem) {
+                    dueElem.textContent = myTenant ? (myTenant.end_date || 'N/A') : 'N/A';
+                }
+                // Ensure the tenant-only row is visible when a tenant is present
+                try {
+                    const tenantRow = document.querySelector('.tenant-only');
+                    if (tenantRow) {
+                        tenantRow.style.display = (myTenant ? 'flex' : 'none');
+                    }
+                } catch (e) {
+                    // ignore
+                }
+             }
+         } catch (e) {
+             console.error('Error showing tenant due date:', e);
+         }
+
+        // If admin, fetch reminder summary
+        if (currentUser && currentUser.role === 'ADMIN') {
+            try {
+                await fetchReminderSummary();
+                await fetchPaymentSummary();
+            } catch (e) {
+                console.error('Error fetching admin summaries:', e);
+            }
+        }
+
         const paymentsResp = await fetch(`${API_URL}/payments`, { credentials: 'include' });
         const payments = await paymentsResp.json();
         const pendingCount = payments.filter(p => !p.paid).length;
@@ -386,6 +421,62 @@ async function loadDashboard() {
     } catch (error) {
         console.error('Dashboard load error:', error);
         showAlert('Error loading dashboard', 'danger');
+    }
+}
+
+// Fetch admin reminder summary and populate the dashboard card
+async function fetchReminderSummary() {
+    try {
+        const resp = await fetch(`${API_URL}/admin/reminder-summary`, { credentials: 'include' });
+        if (!resp.ok) {
+            console.error('Reminder summary request failed', resp.status);
+            return;
+        }
+        const data = await resp.json();
+        document.getElementById('leavingTodayCount').textContent = data.leaving_today || 0;
+        document.getElementById('upcomingTotalCount').textContent = data.total_upcoming || 0;
+
+        const upcomingList = document.getElementById('upcomingList');
+        upcomingList.innerHTML = '';
+        if (Array.isArray(data.upcoming) && data.upcoming.length > 0) {
+            data.upcoming.forEach(item => {
+                const div = document.createElement('div');
+                div.innerHTML = `<small>${item.date}: <strong>${item.count}</strong></small>`;
+                upcomingList.appendChild(div);
+            });
+        } else {
+            upcomingList.innerHTML = '<small>No upcoming departures in configured range.</small>';
+        }
+    } catch (e) {
+        console.error('Error in fetchReminderSummary:', e);
+    }
+}
+
+// Fetch admin payment summary and populate the payment dashboard card
+async function fetchPaymentSummary() {
+    try {
+        const resp = await fetch(`${API_URL}/admin/payment-summary`, { credentials: 'include' });
+        if (!resp.ok) {
+            console.error('Payment summary request failed', resp.status);
+            return;
+        }
+        const data = await resp.json();
+        document.getElementById('paymentsDueToday').textContent = data.due_today || 0;
+        document.getElementById('paymentsDueSoon').textContent = data.total_upcoming || 0;
+
+        const pendingList = document.getElementById('pendingPaymentsList');
+        pendingList.innerHTML = '';
+        if (Array.isArray(data.upcoming) && data.upcoming.length > 0) {
+            data.upcoming.forEach(item => {
+                const div = document.createElement('div');
+                div.innerHTML = `<small>${item.date}: <strong>${item.count}</strong> payment(s)</small>`;
+                pendingList.appendChild(div);
+            });
+        } else {
+            pendingList.innerHTML = '<small>No pending payments in configured range.</small>';
+        }
+    } catch (e) {
+        console.error('Error in fetchPaymentSummary:', e);
     }
 }
 
@@ -551,6 +642,7 @@ async function loadTenants() {
                 <td>Room ${tenant.room_no} (${tenant.room_type})</td>
                 <td>₹${tenant.rent}</td>
                 <td>${tenant.join_date}</td>
+                <td>${tenant.end_date || 'N/A'}</td>
             `;
             tbody.appendChild(row);
         });
@@ -594,6 +686,107 @@ async function loadPayments() {
     } catch (error) {
         console.error('Load payments error:', error);
         showAlert('Error loading payments', 'danger');
+    }
+}
+
+// Load tenant's own payments
+async function loadTenantPayments() {
+    try {
+        // Get current tenant's ID
+        const tenantsResp = await fetch(`${API_URL}/tenants`, { credentials: 'include' });
+        const tenants = await tenantsResp.json();
+        const currentTenant = tenants.find(t => t.user_id === currentUser.id);
+
+        if (!currentTenant) {
+            showAlert('Tenant record not found', 'danger');
+            return;
+        }
+
+        // Get tenant's payments
+        const paymentsResp = await fetch(`${API_URL}/tenants/${currentTenant.id}/payments`, { credentials: 'include' });
+        const payments = await paymentsResp.json();
+
+        const tbody = document.getElementById('tenantPaymentsTableBody');
+        tbody.innerHTML = '';
+
+        if (payments.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="4" class="text-center">No payments found</td></tr>';
+            return;
+        }
+
+        payments.forEach(payment => {
+            const row = document.createElement('tr');
+            const statusBadge = payment.paid ? '<span class="badge bg-success">PAID</span>' : '<span class="badge bg-warning">PENDING</span>';
+            row.innerHTML = `
+                <td>${payment.month}</td>
+                <td>₹${payment.amount}</td>
+                <td>${statusBadge}</td>
+                <td>
+                    <button class="btn btn-sm btn-info" onclick="getTenantPaymentQR(${payment.id})">
+                        <i class="fas fa-qrcode"></i> QR Code
+                    </button>
+                </td>
+            `;
+            tbody.appendChild(row);
+        });
+    } catch (error) {
+        console.error('Load tenant payments error:', error);
+        showAlert('Error loading payments', 'danger');
+    }
+}
+
+// Get QR code for tenant payment
+async function getTenantPaymentQR(paymentId) {
+    try {
+        const resp = await fetch(`${API_URL}/payments/${paymentId}/qr`, { credentials: 'include' });
+        if (!resp.ok) {
+            const data = await resp.json();
+            showAlert(data.error || 'Failed to get QR code', 'danger');
+            return;
+        }
+
+        const data = await resp.json();
+
+        // Show modal with QR code
+        const modalHtml = `
+            <div class="modal fade" id="qrCodeModal" tabindex="-1">
+                <div class="modal-dialog modal-sm">
+                    <div class="modal-content">
+                        <div class="modal-header">
+                            <h5 class="modal-title">Payment QR Code</h5>
+                            <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                        </div>
+                        <div class="modal-body text-center">
+                            <img src="${data.qr_url}" alt="Payment QR Code" class="img-fluid mb-3">
+                            <p><strong>Payment ID:</strong> ${paymentId}</p>
+                            <p><small class="text-muted">Scan this QR code to make payment</small></p>
+                            <p><a href="${data.payment_url}" target="_blank" class="btn btn-sm btn-primary">
+                                <i class="fas fa-external-link-alt"></i> Open Payment Link
+                            </a></p>
+                        </div>
+                        <div class="modal-footer">
+                            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `;
+
+        // Remove old modal if exists
+        const oldModal = document.getElementById('qrCodeModal');
+        if (oldModal) oldModal.remove();
+
+        // Add new modal to body
+        document.body.insertAdjacentHTML('beforeend', modalHtml);
+
+        // Show modal
+        const qrModal = new bootstrap.Modal(document.getElementById('qrCodeModal'));
+        qrModal.show();
+
+        showAlert('QR code generated!', 'success', 2000);
+    } catch (error) {
+        console.error('Get QR code error:', error);
+        showAlert('Error generating QR code: ' + error.message, 'danger');
     }
 }
 
@@ -680,6 +873,61 @@ async function loadComplaints() {
     }
 }
 
+// ============ ADMIN HELPERS ============
+async function sendTestEmail() {
+    if (!currentUser || currentUser.role !== 'ADMIN') {
+        showAlert('Only admins can send test emails', 'danger');
+        return;
+    }
+
+    const to = prompt('Enter recipient email for test', currentUser.email || '');
+    if (!to) return;
+
+    try {
+        const resp = await fetch(`${API_URL}/admin/send-test-email`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify({ to_email: to, subject: 'PG Management - Test Email', body: 'This is a test email sent from PG Management.' })
+        });
+
+        const data = await resp.json();
+        if (resp.ok) {
+            showAlert(`Test email ${data.sent ? 'sent' : 'failed'} to ${data.to_email}`, data.sent ? 'success' : 'danger');
+        } else {
+            showAlert(data.error || 'Failed to send test email', 'danger');
+        }
+    } catch (err) {
+        console.error('sendTestEmail error:', err);
+        showAlert('Connection error: ' + err.message, 'danger');
+    }
+}
+
+async function triggerReminders() {
+    if (!currentUser || currentUser.role !== 'ADMIN') {
+        showAlert('Only admins can trigger reminders', 'danger');
+        return;
+    }
+
+    try {
+        const resp = await fetch(`${API_URL}/admin/trigger-reminders`, {
+            method: 'POST',
+            credentials: 'include'
+        });
+
+        const data = await resp.json();
+        console.log('triggerReminders response:', data);
+        if (resp.ok) {
+            showAlert(`Reminders triggered. ${Array.isArray(data) ? data.length : 0} actions logged (see console).`, 'success', 6000);
+        } else {
+            showAlert(data.error || 'Failed to trigger reminders', 'danger');
+        }
+    } catch (err) {
+        console.error('triggerReminders error:', err);
+        showAlert('Connection error: ' + err.message, 'danger');
+    }
+}
+
 // ============ LOAD DATA ============
 async function loadData() {
     try {
@@ -714,6 +962,10 @@ try {
         window.loadPayments = loadPayments;
         window.loadComplaints = loadComplaints;
         window.loadData = loadData;
+        window.sendTestEmail = sendTestEmail;
+        window.triggerReminders = triggerReminders;
+        window.loadTenantPayments = loadTenantPayments;
+        window.getTenantPaymentQR = getTenantPaymentQR;
     }
 } catch (e) {
     // ignore

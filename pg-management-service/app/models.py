@@ -30,6 +30,9 @@ class Tenant(db.Model):
     phone = db.Column(db.String(15))
     join_date = db.Column(db.Date, default=date.today)
     room_id = db.Column(db.Integer, db.ForeignKey("rooms.id"))
+    # Personal info for admin (optional)
+    address = db.Column(db.String(300), nullable=True)
+    id_info = db.Column(db.String(300), nullable=True)
 
 class Payment(db.Model):
     __tablename__ = "payments"
@@ -39,6 +42,8 @@ class Payment(db.Model):
     month = db.Column(db.String(20))  # Jan 2026
     amount = db.Column(db.Integer)
     paid = db.Column(db.Boolean, default=False)
+    # Optional due date for payment reminders
+    due_date = db.Column(db.Date, nullable=True)
 
 class Complaint(db.Model):
     __tablename__ = "complaints"

@@ -38,6 +38,13 @@
                             <button class="list-group-item list-group-item-action admin-only" onclick="showSection('tenants')" style="display:none;">
                                 <i class="fas fa-users"></i> Tenants
                             </button>
+                            <!-- Admin utility actions -->
+                            <button class="list-group-item list-group-item-action admin-only" style="display:none;" onclick="showTestEmailModal()">
+                                <i class="fas fa-envelope"></i> Send Test Email
+                            </button>
+                            <button class="list-group-item list-group-item-action admin-only" style="display:none;" onclick="triggerReminders()">
+                                <i class="fas fa-bell"></i> Trigger Reminders
+                            </button>
                             <button class="list-group-item list-group-item-action admin-only" onclick="showSection('payments')" style="display:none;">
                                 <i class="fas fa-credit-card"></i> Payments
                             </button>
@@ -132,6 +139,45 @@
                             </div>
                         </div>
                     </div>
+
+                    <!-- Tenant-only: show the tenant's stay due date clearly -->
+                    <div class="row mt-3 tenant-only" style="display:none;">
+                        <div class="col-md-6">
+                            <div class="card">
+                                <div class="card-body">
+                                    <h6 class="card-title">Your Stay Due Date</h6>
+                                    <p id="tenantDueDate" class="mb-0">N/A</p>
+                                    <small class="text-muted">Please contact admin if you want to continue staying.</small>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <!-- Admin-only: Reminder summary for vacating tenants -->
+                    <div class="row mt-3 admin-only" style="display:none;">
+                        <div class="col-md-6">
+                            <div class="card">
+                                <div class="card-body">
+                                    <h6 class="card-title">Vacating Tenants Summary</h6>
+                                    <p><strong>Leaving today:</strong> <span id="leavingTodayCount">0</span></p>
+                                    <p><strong>Leaving in upcoming days:</strong> <span id="upcomingTotalCount">0</span></p>
+                                    <div id="upcomingList" style="max-height:150px; overflow:auto;"></div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <!-- Admin-only: Pending Payments Panel -->
+                    <div class="row mt-3 admin-only" style="display:none;">
+                        <div class="col-md-6">
+                            <div class="card">
+                                <div class="card-body">
+                                    <h6 class="card-title">Pending Payments Summary</h6>
+                                    <p><strong>Due today:</strong> <span id="paymentsDueToday">0</span></p>
+                                    <p><strong>Due soon (next 30 days):</strong> <span id="paymentsDueSoon">0</span></p>
+                                    <div id="pendingPaymentsList" style="max-height:200px; overflow:auto; font-size:0.9em;"></div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
                 </div>
 
                 <!-- Rooms Section -->
@@ -163,6 +209,7 @@
                                     <th>Room Details</th>
                                     <th>Rent</th>
                                     <th>Joined Date</th>
+                                    <th>Due Date</th>
                                 </tr>
                             </thead>
                             <tbody id="tenantsTableBody"></tbody>
@@ -412,6 +459,38 @@
                 <div class="modal-footer">
                     <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
                     <button type="button" class="btn btn-primary" onclick="saveComplaint()">Submit Complaint</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Send Test Email Modal (Admin) -->
+    <div class="modal fade" id="testEmailModal" tabindex="-1">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">Send Test Email</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <form id="testEmailForm">
+                        <div class="mb-3">
+                            <label for="testToEmail" class="form-label">To Email *</label>
+                            <input type="email" class="form-control" id="testToEmail" placeholder="recipient@example.com" required>
+                        </div>
+                        <div class="mb-3">
+                            <label for="testSubject" class="form-label">Subject</label>
+                            <input type="text" class="form-control" id="testSubject" value="PG Management - Test Email">
+                        </div>
+                        <div class="mb-3">
+                            <label for="testBody" class="form-label">Message</label>
+                            <textarea class="form-control" id="testBody" rows="4">This is a test email sent from PG Management.</textarea>
+                        </div>
+                    </form>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="button" class="btn btn-primary" onclick="sendTestEmailFromModal()">Send Email</button>
                 </div>
             </div>
         </div>
